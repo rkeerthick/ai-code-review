@@ -1,0 +1,53 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build outputs
+dist/
+.next/
+out/
+build/
+*.tsbuildinfo
+
+# Environment files
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Prisma
+prisma/migrations/
+!apps/api/prisma/migrations/.gitkeep
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea/
+
+# Test coverage
+coverage/
+
+# Turbo cache
+.turbo/
+
+# Terraform state
+*.tfstate
+*.tfstate.backup
+.terraform/
+
+# Docker
+.docker/
+
+# Kubernetes secrets
+k8s/secrets/

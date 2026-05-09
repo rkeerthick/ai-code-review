@@ -1,0 +1,60 @@
+# ─── Stage 1: Dependencies ────────────────────────────────────────
+FROM node:20-alpine AS deps
+RUN apk add --no-cache libc6-compat
+WORKDIR /app
+RUN npm install -g pnpm@9
+
+COPY package.json pnpm-workspace.yaml turbo.json ./
+COPY apps/web/package.json ./apps/web/
+COPY packages/ ./packages/
+
+RUN pnpm install --frozen-lockfile
+
+# ─── Stage 2: Development ─────────────────────────────────────────
+FROM node:20-alpine AS development
+WORKDIR /app
+RUN npm install -g pnpm@9
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+EXPOSE 3000
+CMD ["pnpm", "--filter", "@ai-code-review/web", "dev"]
+
+# ─── Stage 3: Builder ─────────────────────────────────────────────
+FROM node:20-alpine AS builder
+RUN apk add --no-cache libc6-compat
+WORKDIR /app
+RUN npm install -g pnpm@9
+
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+
+# Build-time env vars
+ARG NEXT_PUBLIC_API_URL
+ARG NEXT_PUBLIC_WS_URL
+
+ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
+ENV NEXT_PUBLIC_WS_URL=${NEXT_PUBLIC_WS_URL}
+ENV NEXT_TELEMETRY_DISABLED=1
+
+WORKDIR /app/apps/web
+RUN pnpm build
+
+# ─── Stage 4: Production ──────────────────────────────────────────
+FROM node:20-alpine AS production
+RUN apk add --no-cache dumb-init
+WORKDIR /app
+
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+
+# Next.js standalone output for minimal image size
+COPY --from=builder --chown=node:node /app/apps/web/.next/standalone ./
+COPY --from=builder --chown=node:node /app/apps/web/.next/static ./.next/static
+COPY --from=builder --chown=node:node /app/apps/web/public ./public
+
+USER node
+
+EXPOSE 3000
+
+ENTRYPOINT ["dumb-init", "--"]
+CMD ["node", "server.js"]

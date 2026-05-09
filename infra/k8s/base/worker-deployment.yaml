@@ -1,0 +1,63 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: review-worker
+  namespace: ai-code-review
+  labels:
+    app: review-worker
+    component: worker
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: review-worker
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: review-worker
+        component: worker
+    spec:
+      terminationGracePeriodSeconds: 300   # Allow long-running reviews to finish
+      containers:
+        - name: worker
+          image: your-registry/api:latest
+          # Workers run the same image but with a different command
+          command: ["node", "dist/worker.main"]
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: 2000m
+              memory: 2Gi    # AI processing needs more memory
+          envFrom:
+            - secretRef:
+                name: api-secrets
+            - configMapRef:
+                name: api-config
+
+---
+# KEDA ScaledObject — scale workers based on BullMQ queue depth
+# Requires KEDA to be installed: helm install keda kedacore/keda
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: review-worker-scaler
+  namespace: ai-code-review
+spec:
+  scaleTargetRef:
+    name: review-worker
+  minReplicaCount: 1
+  maxReplicaCount: 15
+  cooldownPeriod: 60
+  triggers:
+    - type: redis
+      metadata:
+        address: redis-master.ai-code-review:6379
+        listName: bull:ai-review:wait
+        listLength: "5"     # Scale up when queue > 5 jobs per worker

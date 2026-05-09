@@ -1,0 +1,60 @@
+# ─── Stage 1: Dependencies ────────────────────────────────────────
+FROM node:20-alpine AS deps
+RUN apk add --no-cache libc6-compat
+WORKDIR /app
+RUN npm install -g pnpm@9
+
+COPY package.json pnpm-workspace.yaml turbo.json ./
+COPY apps/api/package.json ./apps/api/
+COPY packages/ ./packages/
+
+RUN pnpm install --frozen-lockfile
+
+# ─── Stage 2: Development ─────────────────────────────────────────
+FROM node:20-alpine AS development
+WORKDIR /app
+RUN npm install -g pnpm@9
+
+COPY --from=deps /app/node_modules ./node_modules
+COPY --from=deps /app/apps/api/node_modules ./apps/api/node_modules
+
+COPY . .
+
+WORKDIR /app/apps/api
+RUN npx prisma generate
+
+EXPOSE 3001
+CMD ["pnpm", "dev"]
+
+# ─── Stage 3: Builder ─────────────────────────────────────────────
+FROM node:20-alpine AS builder
+RUN apk add --no-cache libc6-compat
+WORKDIR /app
+RUN npm install -g pnpm@9
+
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+
+WORKDIR /app/apps/api
+RUN npx prisma generate
+RUN pnpm build
+
+# ─── Stage 4: Production ──────────────────────────────────────────
+FROM node:20-alpine AS production
+RUN apk add --no-cache dumb-init
+WORKDIR /app
+
+ENV NODE_ENV=production
+
+# Copy only what's needed for runtime
+COPY --from=builder --chown=node:node /app/apps/api/dist ./dist
+COPY --from=builder --chown=node:node /app/apps/api/node_modules ./node_modules
+COPY --from=builder --chown=node:node /app/apps/api/prisma ./prisma
+
+USER node
+
+EXPOSE 3001
+
+# dumb-init handles signals properly (SIGTERM)
+ENTRYPOINT ["dumb-init", "--"]
+CMD ["node", "dist/main"]

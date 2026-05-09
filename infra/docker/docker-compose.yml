@@ -1,0 +1,158 @@
+version: "3.9"
+
+# AI Code Review — Local Development Stack
+# Usage: docker compose up -d
+
+services:
+  # ─── PostgreSQL ───────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: acr_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: ai_code_review
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─── Redis ────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: acr_redis
+    restart: unless-stopped
+    command: >
+      redis-server
+      --save 60 1
+      --loglevel warning
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─── API (NestJS) ─────────────────────────────────────────────────
+  api:
+    build:
+      context: ../../
+      dockerfile: infra/docker/Dockerfile.api
+      target: development
+    container_name: acr_api
+    restart: unless-stopped
+    env_file: ../../.env
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/ai_code_review?schema=public
+      REDIS_URL: redis://redis:6379
+    ports:
+      - "3001:3001"
+    volumes:
+      - ../../apps/api/src:/app/apps/api/src   # Hot reload
+      - /app/node_modules
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: pnpm --filter @ai-code-review/api dev
+
+  # ─── Web (Next.js) ────────────────────────────────────────────────
+  web:
+    build:
+      context: ../../
+      dockerfile: infra/docker/Dockerfile.web
+      target: development
+    container_name: acr_web
+    restart: unless-stopped
+    env_file: ../../.env
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:3001/api/v1
+      NEXT_PUBLIC_WS_URL: http://localhost:3001
+    ports:
+      - "3000:3000"
+    volumes:
+      - ../../apps/web/src:/app/apps/web/src   # Hot reload
+      - /app/node_modules
+    depends_on:
+      - api
+    command: pnpm --filter @ai-code-review/web dev
+
+  # ─── BullMQ Dashboard (Bull Board) ───────────────────────────────
+  bull-board:
+    image: deadly0/bull-board:latest
+    container_name: acr_bull_board
+    restart: unless-stopped
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+    ports:
+      - "3002:3000"
+    depends_on:
+      - redis
+
+  # ─── PgAdmin (optional, dev only) ────────────────────────────────
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: acr_pgadmin
+    profiles: ["tools"]
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@localhost.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "5050:80"
+    depends_on:
+      - postgres
+
+  # ─── Prometheus (metrics) ────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: acr_prometheus
+    profiles: ["monitoring"]
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=15d"
+
+  # ─── Grafana (dashboards) ────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:latest
+    container_name: acr_grafana
+    profiles: ["monitoring"]
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/dashboards:/etc/grafana/provisioning/dashboards
+    ports:
+      - "3003:3000"
+    depends_on:
+      - prometheus
+
+volumes:
+  postgres_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  default:
+    name: ai_code_review_network

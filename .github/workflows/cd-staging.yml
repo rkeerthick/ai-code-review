@@ -1,0 +1,74 @@
+name: Deploy to Staging
+
+on:
+  push:
+    branches: [develop]
+
+concurrency:
+  group: cd-staging
+  cancel-in-progress: true
+
+jobs:
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    environment: staging
+    needs: []  # Runs after CI passes on develop
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name acr-staging --region us-east-1
+
+      - name: Get image tag from CI
+        id: tag
+        run: echo "IMAGE_TAG=sha-$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Deploy to staging via Kustomize
+        run: |
+          cd infra/k8s/overlays/staging
+          IMAGE_TAG=${{ steps.tag.outputs.IMAGE_TAG }} \
+          DEPLOYMENT_TIMESTAMP=$(date -u +%Y%m%dT%H%M%SZ) \
+          envsubst < kustomization.yaml | kubectl apply -k -
+
+      - name: Run DB migrations on staging
+        run: |
+          kubectl rollout status deployment/api -n ai-code-review --timeout=120s
+          kubectl exec -n ai-code-review deployment/api -- npx prisma migrate deploy
+
+      - name: Verify deployment
+        run: kubectl rollout status deployment/api deployment/web -n ai-code-review --timeout=300s
+
+      - name: Run smoke tests
+        run: |
+          STAGING_URL="https://staging.aicodereview.io/api/health"
+          for i in {1..10}; do
+            if curl -sf "$STAGING_URL" > /dev/null; then
+              echo "Health check passed"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "Health check failed" && exit 1
+
+      - name: Notify Slack on success
+        if: success()
+        run: |
+          curl -X POST ${{ secrets.SLACK_WEBHOOK }} \
+            -H 'Content-type: application/json' \
+            --data '{"text":"✅ Staging deployed: ${{ steps.tag.outputs.IMAGE_TAG }}"}'
+
+      - name: Notify Slack on failure
+        if: failure()
+        run: |
+          curl -X POST ${{ secrets.SLACK_WEBHOOK }} \
+            -H 'Content-type: application/json' \
+            --data '{"text":"🚨 Staging deployment FAILED: ${{ steps.tag.outputs.IMAGE_TAG }}"}'

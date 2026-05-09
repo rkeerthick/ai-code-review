@@ -1,0 +1,144 @@
+name: Deploy to Production
+
+on:
+  push:
+    tags:
+      - "v*.*.*"   # Triggered by version tags: v1.2.3
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: Image tag to deploy (e.g. sha-abc1234)
+        required: true
+      skip_migrations:
+        description: Skip DB migrations
+        type: boolean
+        default: false
+
+concurrency:
+  group: cd-production
+  cancel-in-progress: false   # Never cancel in-progress production deploys
+
+jobs:
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    environment: production    # Requires manual approval gate in GitHub
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_PROD_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_PROD_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+          role-to-assume: ${{ secrets.AWS_PROD_DEPLOY_ROLE_ARN }}
+          role-session-name: GitHubActions-Production
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name acr-production --region us-east-1
+
+      - name: Resolve image tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "IMAGE_TAG=${{ github.event.inputs.image_tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "IMAGE_TAG=sha-$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create deployment record
+        run: |
+          echo "Deploying ${{ steps.tag.outputs.IMAGE_TAG }} to production"
+          echo "Triggered by: ${{ github.actor }}"
+          echo "Commit: ${{ github.sha }}"
+
+      - name: Run DB migrations
+        if: ${{ !github.event.inputs.skip_migrations }}
+        run: |
+          # Create a one-off migration job rather than running in the deployment pod
+          kubectl run db-migrate-$(date +%s) \
+            --image=ghcr.io/${{ github.repository }}/api:${{ steps.tag.outputs.IMAGE_TAG }} \
+            --restart=Never \
+            --rm \
+            -n ai-code-review \
+            --env="DATABASE_URL=${{ secrets.PROD_DATABASE_URL }}" \
+            -- npx prisma migrate deploy
+          # Wait for migration to complete
+          kubectl wait pod -l job-name=db-migrate -n ai-code-review --for=condition=ready --timeout=120s
+
+      - name: Deploy to production
+        run: |
+          cd infra/k8s/overlays/production
+          IMAGE_TAG=${{ steps.tag.outputs.IMAGE_TAG }} \
+          DEPLOYMENT_TIMESTAMP=$(date -u +%Y%m%dT%H%M%SZ) \
+          envsubst < kustomization.yaml | kubectl apply -k -
+
+      - name: Wait for rollout
+        run: |
+          kubectl rollout status deployment/api -n ai-code-review --timeout=600s
+          kubectl rollout status deployment/web -n ai-code-review --timeout=600s
+          kubectl rollout status deployment/review-worker -n ai-code-review --timeout=600s
+
+      - name: Verify production health
+        run: |
+          PROD_URL="https://api.aicodereview.io/api/health"
+          for i in {1..20}; do
+            STATUS=$(curl -sf -o /dev/null -w "%{http_code}" "$PROD_URL" || echo "000")
+            if [ "$STATUS" == "200" ]; then
+              echo "✅ Production health check passed"
+              exit 0
+            fi
+            echo "Attempt $i: Status $STATUS — waiting..."
+            sleep 15
+          done
+          echo "❌ Production health check FAILED — rolling back"
+          kubectl rollout undo deployment/api deployment/web -n ai-code-review
+          exit 1
+
+      - name: Tag release in GitHub
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref_name }}
+          release_name: Release ${{ github.ref_name }}
+          body: |
+            Deployed to production: ${{ steps.tag.outputs.IMAGE_TAG }}
+            Deployed by: ${{ github.actor }}
+          draft: false
+          prerelease: false
+
+      - name: Notify on success
+        if: success()
+        run: |
+          curl -X POST ${{ secrets.SLACK_WEBHOOK }} \
+            -H 'Content-type: application/json' \
+            --data '{
+              "text": "🚀 *Production deployed successfully*",
+              "attachments": [{
+                "color": "good",
+                "fields": [
+                  {"title": "Tag", "value": "${{ github.ref_name }}", "short": true},
+                  {"title": "Image", "value": "${{ steps.tag.outputs.IMAGE_TAG }}", "short": true},
+                  {"title": "Deployed by", "value": "${{ github.actor }}", "short": true}
+                ]
+              }]
+            }'
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          curl -X POST ${{ secrets.SLACK_WEBHOOK }} \
+            -H 'Content-type: application/json' \
+            --data '{
+              "text": "🚨 *PRODUCTION DEPLOYMENT FAILED* — Rollback executed",
+              "attachments": [{
+                "color": "danger",
+                "fields": [
+                  {"title": "Tag", "value": "${{ github.ref_name }}", "short": true},
+                  {"title": "Deployed by", "value": "${{ github.actor }}", "short": true}
+                ]
+              }]
+            }'
