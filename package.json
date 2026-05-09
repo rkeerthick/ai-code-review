@@ -1,0 +1,31 @@
+{
+  "name": "ai-code-review",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Production-grade AI Code Review SaaS Platform",
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "test": "turbo run test",
+    "lint": "turbo run lint",
+    "format": "turbo run format",
+    "db:generate": "turbo run db:generate",
+    "db:migrate": "turbo run db:migrate",
+    "db:studio": "cd apps/api && npx prisma studio",
+    "docker:up": "docker-compose -f infra/docker/docker-compose.yml up -d",
+    "docker:down": "docker-compose -f infra/docker/docker-compose.yml down",
+    "docker:logs": "docker-compose -f infra/docker/docker-compose.yml logs -f"
+  },
+  "devDependencies": {
+    "turbo": "^2.0.0",
+    "prettier": "^3.3.0",
+    "eslint": "^9.0.0",
+    "@typescript-eslint/parser": "^8.0.0",
+    "@typescript-eslint/eslint-plugin": "^8.0.0"
+  },
+  "engines": {
+    "node": ">=20.0.0",
+    "pnpm": ">=9.0.0"
+  },
+  "packageManager": "pnpm@9.14.0"
+}

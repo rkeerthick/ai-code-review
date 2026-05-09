@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
 
 # dependencies
@@ -34,3 +35,58 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+=======
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build outputs
+dist/
+.next/
+out/
+build/
+*.tsbuildinfo
+
+# Environment files
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Prisma
+prisma/migrations/
+!apps/api/prisma/migrations/.gitkeep
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea/
+
+# Test coverage
+coverage/
+
+# Turbo cache
+.turbo/
+
+# Terraform state
+*.tfstate
+*.tfstate.backup
+.terraform/
+
+# Docker
+.docker/
+
+# Kubernetes secrets
+k8s/secrets/
+>>>>>>> feature/dev-version-1

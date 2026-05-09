@@ -1,0 +1,157 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: ai-code-review
+  labels:
+    app: api
+    component: backend
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: api
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0    # Zero-downtime deployments
+  template:
+    metadata:
+      labels:
+        app: api
+        component: backend
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "3001"
+        prometheus.io/path: "/metrics"
+    spec:
+      terminationGracePeriodSeconds: 60   # Allow in-flight requests to complete
+      serviceAccountName: api-sa
+
+      # Spread pods across nodes for HA
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: api
+
+      initContainers:
+        - name: migrate
+          image: your-registry/api:latest
+          command: ["npx", "prisma", "migrate", "deploy"]
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: api-secrets
+                  key: DATABASE_URL
+
+      containers:
+        - name: api
+          image: your-registry/api:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 3001
+              name: http
+
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 1024Mi
+
+          env:
+            - name: NODE_ENV
+              value: production
+            - name: PORT
+              value: "3001"
+          envFrom:
+            - secretRef:
+                name: api-secrets
+            - configMapRef:
+                name: api-config
+
+          # Readiness: don't send traffic until app is ready
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 3001
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+
+          # Liveness: restart if app is stuck
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 3001
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
+
+          # Startup: allow extra time for initial startup
+          startupProbe:
+            httpGet:
+              path: /api/health
+              port: 3001
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            failureThreshold: 20
+
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 10"]  # Drain connections
+
+      imagePullSecrets:
+        - name: registry-credentials
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+  namespace: ai-code-review
+spec:
+  selector:
+    app: api
+  ports:
+    - name: http
+      port: 80
+      targetPort: 3001
+  type: ClusterIP
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: api-hpa
+  namespace: ai-code-review
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: api
+  minReplicas: 3
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300    # Avoid flapping on scale-down

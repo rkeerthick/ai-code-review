@@ -1,0 +1,547 @@
+// AI Code Review SaaS — Prisma Schema
+// PostgreSQL with full multi-tenant SaaS design
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────────────────────────
+// ENUMS
+// ─────────────────────────────────────────────────────────────────
+
+enum UserRole {
+  SUPER_ADMIN
+  USER
+}
+
+enum OrgRole {
+  OWNER
+  ADMIN
+  MEMBER
+  VIEWER
+}
+
+enum Plan {
+  FREE
+  PRO
+  TEAM
+  ENTERPRISE
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  CANCELED
+  PAST_DUE
+  TRIALING
+  UNPAID
+}
+
+enum ReviewStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+  CACHED
+}
+
+enum ReviewSeverity {
+  CRITICAL
+  HIGH
+  MEDIUM
+  LOW
+  INFO
+}
+
+enum ReviewCategory {
+  BUG
+  SECURITY
+  PERFORMANCE
+  QUALITY
+  BEST_PRACTICE
+  TESTING
+  DOCUMENTATION
+  REFACTORING
+  SCALABILITY
+  ACCESSIBILITY
+}
+
+enum PullRequestState {
+  OPEN
+  CLOSED
+  MERGED
+  DRAFT
+}
+
+enum InvitationStatus {
+  PENDING
+  ACCEPTED
+  EXPIRED
+  REVOKED
+}
+
+enum NotificationChannel {
+  EMAIL
+  SLACK
+  IN_APP
+}
+
+enum AuditAction {
+  USER_LOGIN
+  USER_LOGOUT
+  USER_REGISTER
+  REPO_ADDED
+  REPO_REMOVED
+  PR_REVIEWED
+  ORG_CREATED
+  ORG_UPDATED
+  MEMBER_INVITED
+  MEMBER_REMOVED
+  PLAN_UPGRADED
+  PLAN_DOWNGRADED
+  API_KEY_CREATED
+  API_KEY_REVOKED
+  WEBHOOK_CREATED
+  WEBHOOK_DELETED
+}
+
+enum JobStatus {
+  PENDING
+  ACTIVE
+  COMPLETED
+  FAILED
+  DELAYED
+}
+
+// ─────────────────────────────────────────────────────────────────
+// USER & AUTH
+// ─────────────────────────────────────────────────────────────────
+
+model User {
+  id            String   @id @default(uuid())
+  email         String   @unique
+  name          String
+  avatarUrl     String?
+  role          UserRole @default(USER)
+  passwordHash  String?  // null for OAuth-only users
+  emailVerified Boolean  @default(false)
+
+  // GitHub OAuth
+  githubId       String?  @unique
+  githubUsername String?
+  githubTokenEnc String?  // AES-256-GCM encrypted
+
+  // Billing
+  stripeCustomerId String? @unique
+
+  // Metadata
+  lastLoginAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime? // soft delete
+
+  // Relations
+  orgMemberships    OrganizationMember[]
+  invitationsSent   Invitation[]         @relation("InvitedBy")
+  invitationsReceived Invitation[]       @relation("InvitedUser")
+  apiKeys           ApiKey[]
+  auditLogs         AuditLog[]
+  notifications     Notification[]
+
+  @@index([email])
+  @@index([githubId])
+  @@map("users")
+}
+
+// ─────────────────────────────────────────────────────────────────
+// ORGANIZATIONS (Tenants)
+// ─────────────────────────────────────────────────────────────────
+
+model Organization {
+  id          String  @id @default(uuid())
+  name        String
+  slug        String  @unique // URL-safe identifier: "acme-corp"
+  avatarUrl   String?
+  description String?
+  website     String?
+
+  // Billing
+  plan             Plan               @default(FREE)
+  stripeCustomerId String?            @unique
+  subscription     Subscription?
+
+  // Limits (enforced by plan)
+  maxRepositories  Int @default(3)
+  maxMembers       Int @default(5)
+  maxReviewsPerMonth Int @default(50)
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  // Relations
+  members       OrganizationMember[]
+  repositories  Repository[]
+  invitations   Invitation[]
+  apiKeys       ApiKey[]
+  auditLogs     AuditLog[]
+  usageMetrics  UsageMetric[]
+  webhookConfig WebhookConfig?
+
+  @@index([slug])
+  @@map("organizations")
+}
+
+model OrganizationMember {
+  id             String   @id @default(uuid())
+  organizationId String
+  userId         String
+  role           OrgRole  @default(MEMBER)
+  joinedAt       DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, userId])
+  @@index([organizationId])
+  @@index([userId])
+  @@map("organization_members")
+}
+
+model Invitation {
+  id             String           @id @default(uuid())
+  organizationId String
+  email          String
+  role           OrgRole          @default(MEMBER)
+  token          String           @unique @default(uuid())
+  status         InvitationStatus @default(PENDING)
+  expiresAt      DateTime
+
+  invitedById String
+  invitedById_ User   @relation("InvitedBy", fields: [invitedById], references: [id])
+
+  userId String?
+  user   User?   @relation("InvitedUser", fields: [userId], references: [id])
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([organizationId])
+  @@index([email])
+  @@index([token])
+  @@map("invitations")
+}
+
+// ─────────────────────────────────────────────────────────────────
+// REPOSITORIES
+// ─────────────────────────────────────────────────────────────────
+
+model Repository {
+  id             String  @id @default(uuid())
+  organizationId String
+  githubId       Int     @unique
+  fullName       String  // "owner/repo"
+  name           String
+  ownerLogin     String
+  isPrivate      Boolean @default(false)
+  description    String?
+  defaultBranch  String  @default("main")
+  language       String?
+  cloneUrl       String?
+  htmlUrl        String
+
+  // Webhook
+  webhookId     Int?    @unique
+  webhookSecret String? // per-repo HMAC secret (encrypted)
+  webhookActive Boolean @default(false)
+
+  // Review settings
+  autoReview          Boolean @default(true)
+  reviewOnDraft       Boolean @default(false)
+  ignoredPaths        String[] // glob patterns to ignore
+  focusedCategories   ReviewCategory[]
+
+  // Indexing for RAG
+  lastIndexedAt DateTime?
+  isIndexed     Boolean   @default(false)
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  organization Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  pullRequests PullRequest[]
+
+  @@unique([organizationId, githubId])
+  @@index([organizationId])
+  @@index([fullName])
+  @@map("repositories")
+}
+
+// ─────────────────────────────────────────────────────────────────
+// PULL REQUESTS & REVIEWS
+// ─────────────────────────────────────────────────────────────────
+
+model PullRequest {
+  id             String           @id @default(uuid())
+  repositoryId   String
+  organizationId String           // denormalized for query efficiency
+  githubPrNumber Int
+  title          String
+  body           String?
+  state          PullRequestState @default(OPEN)
+  authorLogin    String
+  authorAvatar   String?
+  baseBranch     String
+  headBranch     String
+  headSha        String           // commit SHA of head
+  htmlUrl        String
+
+  // Computed quality score (0-100) from latest review
+  qualityScore Int?
+  reviewStatus ReviewStatus @default(PENDING)
+
+  githubCreatedAt DateTime
+  githubUpdatedAt DateTime
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  repository  Repository   @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  reviewJobs  ReviewJob[]
+
+  @@unique([repositoryId, githubPrNumber])
+  @@index([repositoryId])
+  @@index([organizationId])
+  @@index([state, reviewStatus])
+  @@map("pull_requests")
+}
+
+model ReviewJob {
+  id             String      @id @default(uuid())
+  pullRequestId  String
+  organizationId String      // denormalized
+  status         ReviewStatus @default(PENDING)
+
+  // Processing metadata
+  modelUsed      String?     // "gpt-4.1", "gpt-4.1-mini"
+  tokensUsed     Int?
+  costUsd        Decimal?    @db.Decimal(10, 6)
+  durationMs     Int?
+  filesReviewed  Int?
+  isCached       Boolean     @default(false)
+  cacheKey       String?     // SHA256 of diff content
+
+  errorMessage   String?
+  retryCount     Int     @default(0)
+
+  startedAt    DateTime?
+  completedAt  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  pullRequest     PullRequest     @relation(fields: [pullRequestId], references: [id], onDelete: Cascade)
+  reviewComments  ReviewComment[]
+
+  @@index([pullRequestId])
+  @@index([organizationId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("review_jobs")
+}
+
+model ReviewComment {
+  id           String         @id @default(uuid())
+  reviewJobId  String
+  severity     ReviewSeverity
+  category     ReviewCategory
+  filePath     String
+  startLine    Int
+  endLine      Int?
+  issue        String         @db.Text
+  suggestion   String         @db.Text
+  codeExample  String?        @db.Text
+  confidence   Float          // 0.0 - 1.0
+
+  // GitHub PR comment
+  githubCommentId Int?        // after posting to GitHub
+
+  // User feedback
+  isAccepted   Boolean?       // null=pending, true=accepted, false=dismissed
+  feedbackNote String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  reviewJob ReviewJob @relation(fields: [reviewJobId], references: [id], onDelete: Cascade)
+
+  @@index([reviewJobId])
+  @@index([severity])
+  @@index([category])
+  @@map("review_comments")
+}
+
+// ─────────────────────────────────────────────────────────────────
+// BILLING & SUBSCRIPTIONS
+// ─────────────────────────────────────────────────────────────────
+
+model Subscription {
+  id             String             @id @default(uuid())
+  organizationId String             @unique
+  plan           Plan               @default(FREE)
+  status         SubscriptionStatus @default(ACTIVE)
+
+  // Stripe
+  stripeSubscriptionId String? @unique
+  stripePriceId        String?
+  stripeCurrentPeriodStart DateTime?
+  stripeCurrentPeriodEnd   DateTime?
+  cancelAtPeriodEnd        Boolean @default(false)
+
+  // Trial
+  trialEndsAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@index([stripeSubscriptionId])
+  @@map("subscriptions")
+}
+
+model UsageMetric {
+  id             String @id @default(uuid())
+  organizationId String
+  month          Int    // YYYYMM format e.g. 202501
+  reviewsCount   Int    @default(0)
+  tokensUsed     Int    @default(0)
+  costUsd        Decimal @default(0) @db.Decimal(10, 2)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, month])
+  @@index([organizationId])
+  @@map("usage_metrics")
+}
+
+// ─────────────────────────────────────────────────────────────────
+// API KEYS
+// ─────────────────────────────────────────────────────────────────
+
+model ApiKey {
+  id             String  @id @default(uuid())
+  organizationId String
+  userId         String
+  name           String
+  keyHash        String  @unique // SHA-256 hash, never store plaintext
+  keyPrefix      String  // First 8 chars for display: "acr_live_xxxx..."
+  scopes         String[] // ["review:read", "review:write", "repo:read"]
+
+  lastUsedAt DateTime?
+  expiresAt  DateTime?
+  isRevoked  Boolean   @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id])
+
+  @@index([organizationId])
+  @@index([keyHash])
+  @@map("api_keys")
+}
+
+// ─────────────────────────────────────────────────────────────────
+// NOTIFICATIONS
+// ─────────────────────────────────────────────────────────────────
+
+model Notification {
+  id      String              @id @default(uuid())
+  userId  String
+  channel NotificationChannel
+  title   String
+  body    String              @db.Text
+  data    Json?               // arbitrary metadata
+  isRead  Boolean             @default(false)
+  sentAt  DateTime?
+
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, isRead])
+  @@index([createdAt])
+  @@map("notifications")
+}
+
+model NotificationSetting {
+  id             String  @id @default(uuid())
+  userId         String  @unique
+  emailOnComplete Boolean @default(true)
+  emailOnFail     Boolean @default(true)
+  emailDigest     Boolean @default(true) // weekly digest
+  slackWebhookUrl String?
+  slackOnComplete Boolean @default(false)
+  slackOnFail     Boolean @default(false)
+  inAppEnabled    Boolean @default(true)
+
+  updatedAt DateTime @updatedAt
+
+  @@map("notification_settings")
+}
+
+// ─────────────────────────────────────────────────────────────────
+// WEBHOOK CONFIGURATION
+// ─────────────────────────────────────────────────────────────────
+
+model WebhookConfig {
+  id             String  @id @default(uuid())
+  organizationId String  @unique
+  url            String
+  secret         String  // HMAC secret for outbound webhooks (to notify customer systems)
+  events         String[]
+  isActive       Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@map("webhook_configs")
+}
+
+// ─────────────────────────────────────────────────────────────────
+// AUDIT LOG
+// ─────────────────────────────────────────────────────────────────
+
+model AuditLog {
+  id             String      @id @default(uuid())
+  organizationId String?
+  userId         String?
+  action         AuditAction
+  resourceType   String?     // "repository", "pull_request", etc.
+  resourceId     String?
+  metadata       Json?       // before/after state, request context
+  ipAddress      String?
+  userAgent      String?
+
+  createdAt DateTime @default(now())
+
+  organization Organization? @relation(fields: [organizationId], references: [id])
+  user         User?         @relation(fields: [userId], references: [id])
+
+  @@index([organizationId, createdAt])
+  @@index([userId, createdAt])
+  @@index([action])
+  // Partition by createdAt in production for performance
+  @@map("audit_logs")
+}
