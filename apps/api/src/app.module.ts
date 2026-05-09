@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { HealthController } from './health.controller';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { ThrottlerModule } from '@nestjs/throttler';
 import { EventEmitterModule } from '@nestjs/event-emitter';
@@ -21,6 +22,7 @@ import { AnalyticsModule } from './modules/analytics/analytics.module';
 import { QueuesModule } from './queues/queues.module';
 
 @Module({
+  controllers: [HealthController],
   imports: [
     // Configuration — load .env, validate required vars
     ConfigModule.forRoot({

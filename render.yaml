@@ -1,0 +1,79 @@
+databases:
+  - name: ai-code-review-db
+    databaseName: ai_code_review
+    user: ai_code_review
+    plan: free
+    region: oregon
+
+services:
+  - type: redis
+    name: ai-code-review-redis
+    plan: free
+    region: oregon
+    ipAllowList: []
+
+  - type: web
+    name: ai-code-review-api
+    env: node
+    region: oregon
+    plan: free
+    buildCommand: npm install -g pnpm@9 && pnpm install --frozen-lockfile && cd apps/api && npx prisma generate && pnpm run build
+    startCommand: cd apps/api && npx prisma migrate deploy && node dist/main
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: ai-code-review-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: ai-code-review-redis
+          property: connectionString
+      - key: JWT_SECRET
+        generateValue: true
+      - key: REFRESH_TOKEN_SECRET
+        generateValue: true
+      # Set these manually in the Render dashboard:
+      - key: ENCRYPTION_KEY
+        sync: false
+      - key: APP_URL
+        sync: false
+      - key: CORS_ORIGINS
+        sync: false
+      - key: GITHUB_CLIENT_ID
+        sync: false
+      - key: GITHUB_CLIENT_SECRET
+        sync: false
+      - key: GITHUB_CALLBACK_URL
+        sync: false
+      - key: GITHUB_WEBHOOK_SECRET
+        sync: false
+      - key: OPENAI_BASE_URL
+        value: https://generativelanguage.googleapis.com/v1beta/openai/
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_MODEL
+        value: gemini-2.5-flash
+      - key: OPENAI_MAX_TOKENS
+        value: 4096
+      - key: OPENAI_TEMPERATURE
+        value: 0.1
+      - key: ENABLE_VECTOR_SEARCH
+        value: false
+      - key: ENABLE_RAG
+        value: false
+      - key: ENABLE_REAL_TIME_REVIEWS
+        value: true
+      - key: MAX_FILE_SIZE_FOR_REVIEW
+        value: 500000
+      - key: RATE_LIMIT_WINDOW_MS
+        value: 60000
+      - key: RATE_LIMIT_MAX_FREE
+        value: 60
+      - key: PINECONE_API_KEY
+        value: placeholder
+      - key: PINECONE_INDEX
+        value: code-embeddings

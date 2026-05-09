@@ -1,43 +1,7 @@
-<<<<<<< HEAD
-# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
-
-# dependencies
-/node_modules
-/.pnp
-.pnp.js
-
-# testing
-/coverage
-
-# next.js
-/.next/
-/out/
-
-# production
-/build
-
-# misc
-.DS_Store
-*.pem
-
-# debug
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-
-# local env files
-.env*.local
-.env
-
-# vercel
-.vercel
-
-# typescript
-*.tsbuildinfo
-next-env.d.ts
-=======
 # Dependencies
 node_modules/
+.pnp
+.pnp.js
 .pnpm-store/
 
 # Build outputs
@@ -46,6 +10,7 @@ dist/
 out/
 build/
 *.tsbuildinfo
+next-env.d.ts
 
 # Environment files
 .env
@@ -53,19 +18,21 @@ build/
 .env.*.local
 !.env.example
 
-# Prisma
-prisma/migrations/
-!apps/api/prisma/migrations/.gitkeep
+# Prisma — keep migrations committed so 'prisma migrate deploy' works
+# prisma/migrations/
 
 # Logs
 logs/
 *.log
 npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 pnpm-debug.log*
 
 # OS
 .DS_Store
 Thumbs.db
+*.pem
 
 # IDE
 .vscode/*
@@ -79,14 +46,16 @@ coverage/
 # Turbo cache
 .turbo/
 
-# Terraform state
+# Vercel
+.vercel
+
+# Terraform
 *.tfstate
 *.tfstate.backup
 .terraform/
 
-# Docker
+# Docker volumes
 .docker/
 
 # Kubernetes secrets
 k8s/secrets/
->>>>>>> feature/dev-version-1
