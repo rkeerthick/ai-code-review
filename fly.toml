@@ -1,0 +1,44 @@
+app = "ai-code-review-api"
+primary_region = "iad"
+
+[build]
+  dockerfile = "infra/docker/Dockerfile.api"
+  target = "production"
+
+[deploy]
+  release_command = "node_modules/.bin/prisma migrate deploy"
+
+[env]
+  NODE_ENV = "production"
+  PORT = "3001"
+  OPENAI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
+  OPENAI_MODEL = "gemini-2.5-flash"
+  OPENAI_MAX_TOKENS = "4096"
+  OPENAI_TEMPERATURE = "0.1"
+  ENABLE_VECTOR_SEARCH = "false"
+  ENABLE_RAG = "false"
+  ENABLE_REAL_TIME_REVIEWS = "true"
+  MAX_FILE_SIZE_FOR_REVIEW = "500000"
+  RATE_LIMIT_WINDOW_MS = "60000"
+  RATE_LIMIT_MAX_FREE = "60"
+  PINECONE_API_KEY = "placeholder"
+  PINECONE_INDEX = "code-embeddings"
+
+[http_service]
+  internal_port = 3001
+  force_https = true
+  auto_stop_machines = true
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [http_service.checks]
+    grace_period = "30s"
+    interval = "15s"
+    method = "GET"
+    path = "/api/health"
+    timeout = "5s"
+
+[[vm]]
+  memory = "256mb"
+  cpu_kind = "shared"
+  cpus = 1
