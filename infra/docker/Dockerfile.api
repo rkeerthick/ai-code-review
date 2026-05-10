@@ -51,10 +51,12 @@ COPY --from=builder --chown=node:node /app/apps/api/dist ./dist
 COPY --from=builder --chown=node:node /app/apps/api/node_modules ./node_modules
 COPY --from=builder --chown=node:node /app/apps/api/prisma ./prisma
 
+COPY --from=builder --chown=node:node /app/infra/docker/start.sh ./start.sh
+
 USER node
 
 EXPOSE 3001
 
 # dumb-init handles signals properly (SIGTERM)
 ENTRYPOINT ["dumb-init", "--"]
-CMD ["node", "dist/main"]
+CMD ["sh", "start.sh"]
