@@ -1,0 +1,39 @@
+name: Deploy to Oracle Cloud
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.ORACLE_VM_IP }}
+          username: ubuntu
+          key: ${{ secrets.ORACLE_SSH_KEY }}
+          script: |
+            set -e
+            cd /opt/ai-code-review
+
+            # Write env file from secrets
+            cat > .env.prod <<'ENVEOF'
+            POSTGRES_PASSWORD=${{ secrets.POSTGRES_PASSWORD }}
+            JWT_SECRET=${{ secrets.JWT_SECRET }}
+            REFRESH_TOKEN_SECRET=${{ secrets.REFRESH_TOKEN_SECRET }}
+            ENCRYPTION_KEY=${{ secrets.ENCRYPTION_KEY }}
+            APP_URL=${{ secrets.APP_URL }}
+            CORS_ORIGINS=${{ secrets.CORS_ORIGINS }}
+            GITHUB_CLIENT_ID=${{ secrets.GITHUB_CLIENT_ID }}
+            GITHUB_CLIENT_SECRET=${{ secrets.GITHUB_CLIENT_SECRET }}
+            GITHUB_CALLBACK_URL=${{ secrets.GITHUB_CALLBACK_URL }}
+            GITHUB_WEBHOOK_SECRET=${{ secrets.GITHUB_WEBHOOK_SECRET }}
+            OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
+            ENVEOF
+
+            git pull origin main
+            docker compose -f infra/docker/docker-compose.prod.yml --env-file .env.prod build api
+            docker compose -f infra/docker/docker-compose.prod.yml --env-file .env.prod up -d
+            docker image prune -f
