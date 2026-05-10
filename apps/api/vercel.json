@@ -1,0 +1,14 @@
+{
+  "version": 2,
+  "installCommand": "cd ../.. && npm install -g pnpm@9 && pnpm install --frozen-lockfile",
+  "buildCommand": "npx prisma generate && nest build",
+  "functions": {
+    "api/handler.js": {
+      "maxDuration": 60,
+      "memory": 1024
+    }
+  },
+  "routes": [
+    { "src": "/(.*)", "dest": "/api/handler.js" }
+  ]
+}

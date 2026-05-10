@@ -1,7 +1,7 @@
 'use client';
 
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { useEffect, use, useState, useRef } from 'react';
+import { use, useState, useRef, useEffect } from 'react';
 import { observer } from 'mobx-react-lite';
 import {
   GitPullRequest, AlertTriangle, Shield, Zap,
@@ -11,7 +11,6 @@ import {
 import { formatDistanceToNow } from 'date-fns';
 import toast from 'react-hot-toast';
 import { api } from '../../../../lib/api';
-import { reviewStore } from '../../../../stores/review.store';
 import { authStore } from '../../../../stores/auth.store';
 import { DiffViewer } from './DiffViewer';
 
@@ -108,9 +107,7 @@ const PullRequestDetailPage = observer(function PullRequestDetailPage({
 
   const triggerMutation = useMutation({
     mutationFn: () => api.triggerReview(resolvedParams.id, orgId) as any,
-    onSuccess: (res: any) => {
-      const jobId = res.data?.reviewJobId;
-      if (jobId) reviewStore.subscribeToReview(jobId);
+    onSuccess: () => {
       toast.success('Review started!');
       queryClient.invalidateQueries({ queryKey: ['pr', resolvedParams.id] });
     },
@@ -175,11 +172,6 @@ const PullRequestDetailPage = observer(function PullRequestDetailPage({
     return () => document.removeEventListener('mousedown', handler);
   }, []);
 
-  useEffect(() => {
-    reviewStore.connectWebSocket();
-    return () => reviewStore.disconnect();
-  }, []);
-
   if (isLoading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -191,7 +183,6 @@ const PullRequestDetailPage = observer(function PullRequestDetailPage({
   const pr = data?.data;
   const latestJob = pr?.reviewJobs?.[0];
   const comments = latestJob?.reviewComments ?? [];
-  const liveState = latestJob ? reviewStore.getReviewState(latestJob.id) : undefined;
   const ghComments: any[] = commentsData?.data ?? [];
   const diffFiles: any[] = diffData?.data?.files ?? [];
   const lineComments: any[] = lineCommentsData?.data ?? [];
@@ -230,7 +221,7 @@ const PullRequestDetailPage = observer(function PullRequestDetailPage({
                 <GitPullRequest className="h-3 w-3" /> OPEN
               </span>
             )}
-            <ReviewStatusBadge status={liveState?.status ?? pr?.reviewStatus ?? 'PENDING'} />
+            <ReviewStatusBadge status={pr?.reviewStatus ?? 'PENDING'} />
             {pr?.qualityScore !== null && pr?.qualityScore !== undefined && (
               <span className="text-sm font-medium">
                 Quality: <span className={`font-bold ${pr.qualityScore >= 80 ? 'text-green-600' : pr.qualityScore >= 60 ? 'text-yellow-600' : 'text-red-600'}`}>
@@ -261,18 +252,14 @@ const PullRequestDetailPage = observer(function PullRequestDetailPage({
         </div>
       </div>
 
-      {/* ── Live progress ───────────────────────────────────── */}
-      {(liveState?.status === 'RUNNING' || pr?.reviewStatus === 'RUNNING') && (
+      {/* ── Review in progress (polling every 3s) ───────────── */}
+      {(pr?.reviewStatus === 'RUNNING' || pr?.reviewStatus === 'PENDING') && (
         <div className="rounded-lg border bg-blue-50 dark:bg-blue-950/30 p-4">
-          <div className="flex items-center gap-2 mb-2">
+          <div className="flex items-center gap-2">
             <div className="animate-spin rounded-full h-4 w-4 border-2 border-blue-500 border-t-transparent" />
-            <span className="text-sm font-medium text-blue-700 dark:text-blue-400">AI review in progress...</span>
-          </div>
-          <div className="w-full bg-blue-200 rounded-full h-1.5">
-            <div
-              className="bg-blue-500 h-1.5 rounded-full transition-all duration-500"
-              style={{ width: `${liveState?.progress ?? 30}%` }}
-            />
+            <span className="text-sm font-medium text-blue-700 dark:text-blue-400">
+              AI review in progress… refreshing automatically
+            </span>
           </div>
         </div>
       )}

@@ -1,6 +1,6 @@
 import { Process, Processor, OnQueueFailed, OnQueueCompleted } from '@nestjs/bull';
 import { Job } from 'bull';
-import { Logger } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { createHash } from 'crypto';
 import { PrismaService } from '../../database/prisma.service';
@@ -19,6 +19,7 @@ export interface ReviewJobData {
   headSha: string;
 }
 
+@Injectable()
 @Processor(QUEUE_NAMES.AI_REVIEW)
 export class AiReviewProcessor {
   private readonly logger = new Logger(AiReviewProcessor.name);
@@ -34,12 +35,16 @@ export class AiReviewProcessor {
 
   @Process(JOB_NAMES.PROCESS_PR_REVIEW)
   async processReview(job: Job<ReviewJobData>) {
-    const { reviewJobId, pullRequestId, repositoryId, organizationId, prNumber, headSha } = job.data;
+    await this.executeReview(job.data, async (pct: number) => job.progress(pct));
+  }
+
+  /** Direct execution — used in serverless mode (no Bull queue). */
+  async executeReview(data: ReviewJobData, onProgress?: (pct: number) => Promise<void>) {
+    const { reviewJobId, pullRequestId, repositoryId, organizationId, prNumber, headSha } = data;
     const startTime = Date.now();
 
     this.logger.log(`Processing review job ${reviewJobId} for PR #${prNumber}`);
 
-    // Mark job as running
     await this.prisma.reviewJob.update({
       where: { id: reviewJobId },
       data: { status: 'RUNNING', startedAt: new Date() },
@@ -48,7 +53,6 @@ export class AiReviewProcessor {
     await this.emit('review.started', { reviewJobId, pullRequestId });
 
     try {
-      // ── Step 1: Check review cache ──────────────────────────────────
       const diffCacheKey = this.buildCacheKey(repositoryId, prNumber, headSha);
       const cachedReview = await this.checkReviewCache(diffCacheKey);
 
@@ -58,9 +62,7 @@ export class AiReviewProcessor {
         return;
       }
 
-      // ── Step 2: Fetch PR diff from GitHub ───────────────────────────
-      await job.progress(15);
-      this.logger.debug(`Fetching diff for PR #${prNumber}`);
+      await onProgress?.(15);
       const prDiff = await this.github.getPullRequestDiff(repositoryId, prNumber);
 
       if (prDiff.files.length === 0) {
@@ -69,14 +71,12 @@ export class AiReviewProcessor {
         return;
       }
 
-      // ── Step 3: Parse diff into chunks ──────────────────────────────
-      await job.progress(25);
+      await onProgress?.(25);
       const parsedFiles = this.diffParser.parseDiff(prDiff.files);
       const chunks = this.diffParser.splitIntoChunks(parsedFiles);
       this.logger.debug(`Split into ${chunks.length} review chunks`);
 
-      // ── Step 4: Get RAG context ──────────────────────────────────────
-      await job.progress(35);
+      await onProgress?.(35);
       let ragContext: string | undefined;
       try {
         const searchQuery = chunks.slice(0, 3).map((c) => c.content.slice(0, 200)).join('\n');
@@ -86,24 +86,18 @@ export class AiReviewProcessor {
         this.logger.warn('RAG context retrieval failed — proceeding without context');
       }
 
-      // ── Step 5: Run AI analysis ─────────────────────────────────────
-      await job.progress(50);
+      await onProgress?.(50);
       this.logger.log(`Running AI analysis on ${chunks.length} chunks for PR #${prNumber}`);
 
-      const reviewResult = await this.analyzer.analyzeMultipleChunks(
-        chunks,
-        prDiff.title,
-        ragContext,
-      );
+      const reviewResult = await this.analyzer.analyzeMultipleChunks(chunks, prDiff.title, ragContext);
 
-      await job.progress(80);
+      await onProgress?.(80);
 
-      // ── Step 6: Post comments to GitHub PR ──────────────────────────
       const criticalOrHighComments = reviewResult.comments.filter(
         (c) => c.severity === 'CRITICAL' || c.severity === 'HIGH',
       );
 
-      for (const comment of criticalOrHighComments.slice(0, 20)) { // Limit to 20 inline comments
+      for (const comment of criticalOrHighComments.slice(0, 20)) {
         try {
           await this.github.postReviewComment(repositoryId, prNumber, {
             body: this.formatGitHubComment(comment),
@@ -115,23 +109,16 @@ export class AiReviewProcessor {
         }
       }
 
-      // Post summary review — skip for merged/closed PRs (GitHub rejects it)
       if (reviewResult.comments.length > 0) {
         try {
-          await this.github.submitPRReview(
-            repositoryId,
-            prNumber,
-            this.buildGitHubSummary(reviewResult),
-            'COMMENT', // Never REQUEST_CHANGES — works on open and merged PRs
-          );
+          await this.github.submitPRReview(repositoryId, prNumber, this.buildGitHubSummary(reviewResult), 'COMMENT');
         } catch (err) {
           this.logger.warn(`Could not post GitHub review summary (PR may be merged): ${err}`);
         }
       }
 
-      await job.progress(90);
+      await onProgress?.(90);
 
-      // ── Step 7: Store results in DB ─────────────────────────────────
       const durationMs = Date.now() - startTime;
       await this.storeResults(reviewJobId, pullRequestId, reviewResult, {
         durationMs,
@@ -139,10 +126,9 @@ export class AiReviewProcessor {
         cacheKey: diffCacheKey,
       });
 
-      // ── Step 8: Cache the review result ─────────────────────────────
       await this.cacheReviewResult(diffCacheKey, reviewResult);
 
-      await job.progress(100);
+      await onProgress?.(100);
       this.logger.log(
         `Review job ${reviewJobId} completed: ${reviewResult.comments.length} issues, score=${reviewResult.qualityScore}, ${durationMs}ms`,
       );
@@ -161,15 +147,13 @@ export class AiReviewProcessor {
       });
 
       await this.emit('review.failed', { reviewJobId, pullRequestId, error: errMsg });
-      throw error; // Re-throw so BullMQ triggers retry
+      throw error;
     }
   }
 
   @OnQueueFailed()
   async onJobFailed(job: Job<ReviewJobData>, err: Error) {
-    this.logger.error(
-      `Job ${job.id} failed after ${job.attemptsMade} attempts: ${err.message}`,
-    );
+    this.logger.error(`Job ${job.id} failed after ${job.attemptsMade} attempts: ${err.message}`);
   }
 
   @OnQueueCompleted()
@@ -184,7 +168,6 @@ export class AiReviewProcessor {
     meta: { durationMs?: number; filesReviewed?: number; isCached?: boolean; cacheKey?: string },
   ) {
     await this.prisma.$transaction(async (tx) => {
-      // Store all review comments
       if (result.comments.length > 0) {
         await tx.reviewComment.createMany({
           data: result.comments.map((c: any) => ({
@@ -202,7 +185,6 @@ export class AiReviewProcessor {
         });
       }
 
-      // Update job to completed
       await tx.reviewJob.update({
         where: { id: reviewJobId },
         data: {
@@ -217,13 +199,9 @@ export class AiReviewProcessor {
         },
       });
 
-      // Update pull request status + quality score
       await tx.pullRequest.update({
         where: { id: pullRequestId },
-        data: {
-          reviewStatus: 'COMPLETED',
-          qualityScore: result.qualityScore,
-        },
+        data: { reviewStatus: 'COMPLETED', qualityScore: result.qualityScore },
       });
     });
 
@@ -249,28 +227,20 @@ export class AiReviewProcessor {
   }
 
   private buildCacheKey(repoId: string, prNumber: number, headSha: string): string {
-    return createHash('sha256')
-      .update(`${repoId}:${prNumber}:${headSha}`)
-      .digest('hex')
-      .slice(0, 32);
+    return createHash('sha256').update(`${repoId}:${prNumber}:${headSha}`).digest('hex').slice(0, 32);
   }
 
   private async checkReviewCache(_key: string): Promise<any | null> {
-    // Redis cache lookup — returns cached ReviewResult or null
-    // In full implementation: return this.redis.get(`review:${key}`)
     return null;
   }
 
-  private async cacheReviewResult(_key: string, _result: any): Promise<void> {
-    // Cache for 24 hours: await this.redis.setex(`review:${key}`, 86400, JSON.stringify(result))
-  }
+  private async cacheReviewResult(_key: string, _result: any): Promise<void> {}
 
   private formatGitHubComment(comment: any): string {
     const severityEmoji: Record<string, string> = {
       CRITICAL: '🚨', HIGH: '⚠️', MEDIUM: '💡', LOW: '📝', INFO: 'ℹ️',
     };
     const emoji = severityEmoji[comment.severity] ?? '💬';
-
     return [
       `${emoji} **[${comment.severity}] ${comment.category}**`,
       '',
@@ -287,7 +257,6 @@ export class AiReviewProcessor {
     const critical = result.comments.filter((c: any) => c.severity === 'CRITICAL').length;
     const high = result.comments.filter((c: any) => c.severity === 'HIGH').length;
     const medium = result.comments.filter((c: any) => c.severity === 'MEDIUM').length;
-
     return [
       `## 🤖 AI Code Review Summary`,
       '',
